@@ -33,19 +33,31 @@ def slope(series, length=3):
 
 def is_green_candle(candle):
     """Check if candle is green (close > open)"""
-    return candle["Close"] > candle["Open"]
+    close_val = candle["Close"].iloc[0] if hasattr(candle["Close"], "iloc") else float(candle["Close"])
+    open_val = candle["Open"].iloc[0] if hasattr(candle["Open"], "iloc") else float(candle["Open"])
+    return close_val > open_val
 
 def candle_body_low(candle):
     """Get the lower end of candle body"""
-    return min(candle["Open"], candle["Close"])
+    close_val = candle["Close"].iloc[0] if hasattr(candle["Close"], "iloc") else float(candle["Close"])
+    open_val = candle["Open"].iloc[0] if hasattr(candle["Open"], "iloc") else float(candle["Open"])
+    return min(open_val, close_val)
 
 def touches_sma(candle, sma_value, tolerance=0.001):
     """Check if green candle touches SMA (body or wick)"""
     if not is_green_candle(candle):
         return False
     
+    if pd.isna(sma_value):
+        return False
+    
+    # Extract scalar values to avoid Series ambiguity
+    low_val = candle["Low"].iloc[0] if hasattr(candle["Low"], "iloc") else float(candle["Low"])
+    high_val = candle["High"].iloc[0] if hasattr(candle["High"], "iloc") else float(candle["High"])
+    sma_val = sma_value.iloc[0] if hasattr(sma_value, "iloc") else float(sma_value)
+    
     # Check if SMA is within the candle's range (low to high)
-    return candle["Low"] <= sma_value * (1 + tolerance) and candle["High"] >= sma_value * (1 - tolerance)
+    return (low_val <= sma_val * (1 + tolerance)) and (high_val >= sma_val * (1 - tolerance))
 
 def check_slope_upwards(df, idx, period=3, sma_column="SMA20"):
     """Check if SMA has upward slope"""
@@ -75,7 +87,13 @@ def find_crossover_up(df, idx):
     if pd.isna(prev_sma20) or pd.isna(prev_sma50) or pd.isna(curr_sma20) or pd.isna(curr_sma50):
         return False
     
-    return prev_sma20 <= prev_sma50 and curr_sma20 > curr_sma50
+    # Convert to float to avoid Series ambiguity
+    prev_sma20_val = prev_sma20.iloc[0] if hasattr(prev_sma20, "iloc") else float(prev_sma20)
+    prev_sma50_val = prev_sma50.iloc[0] if hasattr(prev_sma50, "iloc") else float(prev_sma50)
+    curr_sma20_val = curr_sma20.iloc[0] if hasattr(curr_sma20, "iloc") else float(curr_sma20)
+    curr_sma50_val = curr_sma50.iloc[0] if hasattr(curr_sma50, "iloc") else float(curr_sma50)
+    
+    return (prev_sma20_val <= prev_sma50_val) and (curr_sma20_val > curr_sma50_val)
 
 def calculate_bounce_percentage(support_low, high_price):
     """Calculate bounce percentage from support low to high"""
@@ -112,102 +130,23 @@ def advanced_scanner(df, bounce_threshold=1.0):
     
     # Start from index 50 to ensure we have enough SMA data
     for i in range(50, len(df)):
-        candle = df.iloc[i]
-        sma20, sma50 = candle["SMA20"], candle["SMA50"]
-        
-        # Skip if SMA values are NaN
-        if pd.isna(sma20) or pd.isna(sma50):
-            continue
-        
-        # Check if both SMAs have upward slope
-        sma20_slope_up = check_slope_upwards(df, i, 3, "SMA20")
-        sma50_slope_up = check_slope_upwards(df, i, 3, "SMA50")
-        
-        # Reset if slopes are not upward or price closes below SMA50
-        if not (sma20_slope_up and sma50_slope_up) or candle["Close"] < sma50:
-            if state > 0:  # Only reset if we were in a pattern
-                state = 0
-                support_count = 0
-                last_support_low = np.nan
-                last_support_idx = -1
-                crossover_idx = -1
-                bounce_count = 0
-                last_bounce_high = np.nan
-            continue
-        
-        # State 0: Looking for crossover
-        if state == 0:
-            if find_crossover_up(df, i):
-                state = 1
-                crossover_idx = i
-                support_count = 0
-                last_support_low = np.nan
-                last_support_idx = -1
-                bounce_count = 0
-                last_bounce_high = np.nan
-            continue
-        
-        # State 1: After crossover, looking for S1 (first support)
-        elif state == 1:
-            if touches_sma(candle, sma20) or touches_sma(candle, sma50):
-                support_count = 1
-                last_support_low = candle_body_low(candle)
-                last_support_idx = i
-                state = 2  # Move to waiting for bounce
-                
-                # Record S1 (no bounce required for first support)
-                results.append({
-                    "Date": candle["Date"] if "Date" in candle else df.index[i],
-                    "Index": i,
-                    "Support_Level": "S1",
-                    "Support_Low": last_support_low,
-                    "SMA20": sma20,
-                    "SMA50": sma50,
-                    "Bounce_From_Previous": "N/A (First Support)"
-                })
-            continue
-        
-        # State 2: After support, waiting for bounce
-        elif state == 2:
-            if last_support_idx >= 0:
-                # Calculate bounce from last support low
-                bounce_pct = calculate_bounce_percentage(last_support_low, candle["High"])
-                
-                if bounce_pct >= bounce_threshold:
-                    bounce_count += 1
-                    last_bounce_high = candle["High"]
-                    state = 3  # Move to waiting for next support
-            continue
-        
-        # State 3: After bounce, waiting for next support
-        elif state == 3:
-            if touches_sma(candle, sma20) or touches_sma(candle, sma50):
-                current_support_low = candle_body_low(candle)
-                
-                # Check if current support low is higher than previous support low
-                if current_support_low > last_support_low:
-                    support_count += 1
-                    
-                    # Calculate bounce percentage from previous support
-                    bounce_from_prev = calculate_bounce_percentage(last_support_low, last_bounce_high)
-                    
-                    # Record the support
-                    results.append({
-                        "Date": candle["Date"] if "Date" in candle else df.index[i],
-                        "Index": i,
-                        "Support_Level": f"S{support_count}",
-                        "Support_Low": current_support_low,
-                        "SMA20": sma20,
-                        "SMA50": sma50,
-                        "Bounce_From_Previous": f"{bounce_from_prev:.2f}%"
-                    })
-                    
-                    # Update state variables
-                    last_support_low = current_support_low
-                    last_support_idx = i
-                    state = 2  # Go back to waiting for bounce
-                else:
-                    # Current support is not higher, invalidate pattern
+        try:
+            candle = df.iloc[i]
+            sma20, sma50 = candle["SMA20"], candle["SMA50"]
+            
+            # Skip if SMA values are NaN
+            if pd.isna(sma20) or pd.isna(sma50):
+                continue
+            
+            # Check if both SMAs have upward slope
+            sma20_slope_up = check_slope_upwards(df, i, 3, "SMA20")
+            sma50_slope_up = check_slope_upwards(df, i, 3, "SMA50")
+            
+            # Reset if slopes are not upward or price closes below SMA50
+            close_val = candle["Close"].iloc[0] if hasattr(candle["Close"], "iloc") else float(candle["Close"])
+            sma50_val = sma50.iloc[0] if hasattr(sma50, "iloc") else float(sma50)
+            if not (sma20_slope_up and sma50_slope_up) or (close_val < sma50_val):
+                if state > 0:  # Only reset if we were in a pattern
                     state = 0
                     support_count = 0
                     last_support_low = np.nan
@@ -215,6 +154,93 @@ def advanced_scanner(df, bounce_threshold=1.0):
                     crossover_idx = -1
                     bounce_count = 0
                     last_bounce_high = np.nan
+                continue
+            
+            # State 0: Looking for crossover
+            if state == 0:
+                if find_crossover_up(df, i):
+                    state = 1
+                    crossover_idx = i
+                    support_count = 0
+                    last_support_low = np.nan
+                    last_support_idx = -1
+                    bounce_count = 0
+                    last_bounce_high = np.nan
+                continue
+            
+            # State 1: After crossover, looking for S1 (first support)
+            elif state == 1:
+                if touches_sma(candle, sma20) or touches_sma(candle, sma50):
+                    support_count = 1
+                    last_support_low = candle_body_low(candle)
+                    last_support_idx = i
+                    state = 2  # Move to waiting for bounce
+                    
+                    # Record S1 (no bounce required for first support)
+                    results.append({
+                        "Date": candle["Date"] if "Date" in candle else df.index[i],
+                        "Index": i,
+                        "Support_Level": "S1",
+                        "Support_Low": last_support_low,
+                        "SMA20": sma20,
+                        "SMA50": sma50,
+                        "Bounce_From_Previous": "N/A (First Support)"
+                    })
+                continue
+            
+            # State 2: After support, waiting for bounce
+            elif state == 2:
+                if last_support_idx >= 0:
+                    # Calculate bounce from last support low
+                    high_val = candle["High"].iloc[0] if hasattr(candle["High"], "iloc") else float(candle["High"])
+                    bounce_pct = calculate_bounce_percentage(last_support_low, high_val)
+                    
+                    if bounce_pct >= bounce_threshold:
+                        bounce_count += 1
+                        last_bounce_high = candle["High"].iloc[0] if hasattr(candle["High"], "iloc") else float(candle["High"])
+                        state = 3  # Move to waiting for next support
+                continue
+            
+            # State 3: After bounce, waiting for next support
+            elif state == 3:
+                if touches_sma(candle, sma20) or touches_sma(candle, sma50):
+                    current_support_low = candle_body_low(candle)
+                    
+                    # Check if current support low is higher than previous support low
+                    if current_support_low > last_support_low:
+                        support_count += 1
+                        
+                        # Calculate bounce percentage from previous support
+                        bounce_from_prev = calculate_bounce_percentage(last_support_low, last_bounce_high)
+                        
+                        # Record the support
+                        results.append({
+                            "Date": candle["Date"] if "Date" in candle else df.index[i],
+                            "Index": i,
+                            "Support_Level": f"S{support_count}",
+                            "Support_Low": current_support_low,
+                            "SMA20": sma20,
+                            "SMA50": sma50,
+                            "Bounce_From_Previous": f"{bounce_from_prev:.2f}%"
+                        })
+                        
+                        # Update state variables
+                        last_support_low = current_support_low
+                        last_support_idx = i
+                        state = 2  # Go back to waiting for bounce
+                    else:
+                        # Current support is not higher, invalidate pattern
+                        state = 0
+                        support_count = 0
+                        last_support_low = np.nan
+                        last_support_idx = -1
+                        crossover_idx = -1
+                        bounce_count = 0
+                        last_bounce_high = np.nan
+                continue
+                
+        except Exception as e:
+            # Skip this candle if there's any processing error
             continue
     
     # Filter results to only show patterns that reached at least S3
